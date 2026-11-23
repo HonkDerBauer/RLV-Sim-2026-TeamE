@@ -1,0 +1,61 @@
+# @package gnc.guidance
+# NOTE: align this header with configs/gnc/guidance/template.yaml (copy its header if different).
+# Every value below is a PLACEHOLDER to tune for your vehicle / scenario.
+law:
+  _target_: gnc.guidance.falcon9_mission.build
+
+# Keys read by gnc.build for every guidance config:
+attitude_tilt_max_deg: 85.0
+aero_steer_gain: 0.0
+aero_tilt_max_deg: 10.0
+
+mission:
+  # --- engine sets (indices into params.engines.positions; each set must be laterally symmetric)
+  ascent_engines: [0, 1, 2, 3, 4, 5, 6, 7, 8]
+  boostback_engines: [0, 1, 5]      # center + symmetric ring pair: adapt to your layout
+  entry_engines: [0, 1, 5]
+  landing_engines: [0]              # center engine only
+
+  # --- ascent
+  launch_azimuth_deg: 90.0          # NED azimuth, 0 = north, 90 = east
+  t_kick_s: 8.0
+  kick_duration_s: 6.0
+  kick_angle_deg: 2.0
+  v_turn_min_mps: 20.0
+  maxq_throttle: 0.72
+  maxq_on_pa: 28000.0
+  maxq_off_pa: 20000.0
+  accel_limit_g: 3.6
+  meco_propellant_kg: null          # MECO when m <= m_dry + this (null = disabled)
+  meco_speed_mps: 2300.0            # ... or when |v| >= this (null = disabled)
+  separation_delay_s: 4.0
+
+  # --- flip + boostback
+  flip_timeout_s: 12.0
+  flip_att_tol_deg: 5.0
+  flip_rate_tol_rad_s: 0.05
+  boostback_elevation_deg: 8.0
+  boostback_tilt_max_deg: 85.0
+  boostback_throttle: 1.0
+  boostback_burn_timeout_s: 60.0
+  boostback_min_propellant_kg: 6000.0   # propellant kept for entry + landing
+  target_ne_m: [0.0, 0.0]               # landing site (north, east) in the NED frame [m]
+  projection_altitude_m: 10000.0
+  projection_tol_m: 2000.0              # crude predictor: do not over-tighten
+
+  # --- entry burn
+  entry_altitude_m: 65000.0
+  entry_end_altitude_m: 40000.0
+  entry_end_speed_mps: 700.0
+
+  # --- landing burn
+  landing_margin: 1.15
+  landing_design_throttle: 0.85
+  landing_decel_mps2: 15.0
+  touchdown_speed_mps: 2.0
+  cutoff_altitude_m: 0.5
+  landing_backstop_altitude_m: 300.0
+  landing_kv: 1.5
+  landing_wn_rad_s: 0.25
+  landing_zeta: 0.9
+  landing_tilt_max_deg: 12.0

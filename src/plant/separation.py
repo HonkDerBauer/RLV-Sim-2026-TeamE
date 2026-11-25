@@ -17,8 +17,11 @@ class Separation:
 
     def __init__(self, cfg):
         spec = cfg.scenario.separation
-        if set(spec) != {"impulse_model", "aero"} or spec.impulse_model != "none":
-            raise ValueError("separation requires explicit impulse_model=none and aero")
+        keys = set(spec)
+        if not {"impulse_model", "aero"} <= keys <= {"impulse_model", "aero", "fwd_axis"}:
+            raise ValueError("separation requires impulse_model and aero (optional fwd_axis)")
+        if spec.impulse_model != "none":
+            raise ValueError("separation requires explicit impulse_model=none")
         component = cfg.plant.vehicle.get("attached_component")
         if component is None or cfg.plant.vehicle.massprops_model != "dual_tank":
             raise ValueError("separation requires an attached dual_tank vehicle")
@@ -47,6 +50,13 @@ class Separation:
                 raise ValueError("separation aero overrides must describe body aerodynamics only")
             self.cfg.plant.aero = OmegaConf.merge(self.cfg.plant.aero, spec.aero)
             self.cfg.plant.aero.fins.fin_x -= self.origin_x
+            if spec.get("fwd_axis") is not None:
+                # Aero reference axis of the retained booster, e.g. [-1, 0, 0] for the
+                # base-first recovery coefficients after the flip.
+                axis = [float(x) for x in spec.fwd_axis]
+                if len(axis) != 3 or not np.isclose(np.linalg.norm(axis), 1.0):
+                    raise ValueError("separation fwd_axis must be a unit 3-vector")
+                v.geom.fwd_axis = axis
         self.bundle = build_plant(self.cfg)
 
     def apply(self, session):

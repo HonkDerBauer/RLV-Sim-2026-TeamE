@@ -129,6 +129,8 @@ def main(cfg):
     for kind in ("solver", "control"):
         if kind in result.aux:
             (out_dir / f"{kind}_stats.json").write_text(json.dumps(result.aux[kind], indent=2))
+    if "zemzev" in result.aux:  # ZEM/ZEV per-tick guidance telemetry (tgo, ZEM, ZEV, saturation)
+        (out_dir / "zemzev_log.json").write_text(json.dumps(result.aux["zemzev"]))
 
     from validation.analytical import validate_episode, write_validation
 

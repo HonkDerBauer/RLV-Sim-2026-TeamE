@@ -354,6 +354,9 @@ def _attach_gnc_aux(result, gnc_mem):
     result.aux["control"] = _control_stats(_collect_mem_lists(gnc_mem, "control_timing"))
     result.aux["plan_ignition"] = _find_mem_key(gnc_mem, "plan_ignition")
     result.aux["t_ignition"] = _find_mem_key(gnc_mem, "t_ignition")
+    zemzev_log = _collect_mem_lists(gnc_mem, "zemzev_log")
+    if zemzev_log:
+        result.aux["zemzev"] = zemzev_log
 
 
 def _control_stats(samples):
@@ -427,6 +430,7 @@ def run_simulation(
     record_telemetry: bool = True,
     prescribed=None,
     mission=None,
+    handoff=None,
 ) -> EpisodeResult:
     """Advance for at most t_max seconds from state0.t on an exact fixed-step grid.
 
@@ -435,15 +439,24 @@ def run_simulation(
     native terminal time. Navigation records are synchronous, full-rate truth/meas/estimate
     triples. Actuator rows describe each native block and separate requested, delayed, and
     effective endpoint inputs. delay_ticks is always measured in control periods.
+
+    ``handoff`` (with ``prescribed``) switches to closed-loop GNC at the LAST prescribed event:
+    ``handoff.build(state, aux) -> (controller, nav)`` is called on that tick, after the event
+    (e.g. stage separation) is applied, and the run continues closed-loop in the same session.
     """
     if mission is not None and prescribed is None:
         raise ValueError("mission requires a prescribed prefix")
+    if handoff is not None and (prescribed is None or mission is not None):
+        raise ValueError("handoff requires a prescribed prefix and no mission")
     if prescribed is not None:
-        if controller is not None or nav is not None or delay_ticks:
-            raise ValueError("prescribed execution uses no GNC, navigation, or command delay")
+        if controller is not None or nav is not None:
+            raise ValueError("prescribed execution starts without GNC or navigation")
+        if delay_ticks and handoff is None:
+            raise ValueError("prescribed execution uses no command delay")
         if not np.isclose(prescribed.dt, plant_dt, atol=1e-12, rtol=0):
             raise ValueError("input schedule and plant_dt must match")
-        nav_dt = guidance_dt = ctrl_dt
+        if handoff is None:
+            nav_dt = guidance_dt = ctrl_dt
     elif controller is None or nav is None:
         raise ValueError("closed-loop execution requires controller and navigation")
     schedule = build_schedule(plant_dt, t_max, ctrl_dt, nav_dt, guidance_dt, log_dt)
@@ -452,8 +465,13 @@ def run_simulation(
     if not isinstance(delay_ticks, (int, np.integer)) or delay_ticks < 0:
         raise ValueError("delay_ticks must be a non-negative integer of control periods")
     split = hasattr(controller, "guide") and hasattr(controller, "control_allocate")
-    if not split and schedule.guidance != schedule.control:
+    if handoff is None and not split and schedule.guidance != schedule.control:
         raise ValueError("independent guidance_dt requires guide/control_allocate methods")
+    # Closed-loop GNC is active from the start, or from the handoff tick on.
+    closed = prescribed is None
+    handoff_tick = max(prescribed.rows) if handoff is not None else None
+    # Prescribed phase tags share the log with GNC phase tags: offset them when both occur.
+    phase_offset = 100 if handoff is not None else 0
 
     active_bundle = bundle
     configuration = 0
@@ -506,6 +524,46 @@ def run_simulation(
     phase = -1
     prog = _Progress(t_max, progress)
 
+    def _nav_step(state, aux, held, nav_mem):
+        """One synchronous navigation update (measurement + estimate + telemetry)."""
+        seed = int(nav_rng.bit_generator.random_raw())
+        # Keep independent records even if an estimator updates its input arrays in place.
+        truth_row = _state_record(state) if record_telemetry else None
+        if hasattr(nav, "measure_native"):
+            meas = nav.measure_native(copy.deepcopy(state), seed, copy.deepcopy(aux))
+        else:
+            meas = nav.measure(copy.deepcopy(state), seed)
+        meas = _stamp_epoch(meas, float(state.t))
+        measurement_row = _state_record(meas) if record_telemetry else None
+        if record_telemetry and hasattr(meas, "accel_body"):
+            for key in (
+                "accel_body",
+                "gyro_body",
+                "gnss_valid",
+                "radar_alt_m",
+                "radar_valid",
+                "alignment_valid",
+                "gnss_scheduled",
+                "radar_scheduled",
+                "gnss_outlier",
+            ):
+                sensor_log.setdefault(key, []).append(np.array(getattr(meas, key), copy=True))
+        x_hat, nav_mem = nav.estimate(meas, held, nav_mem)
+        x_hat = _stamp_epoch(x_hat, float(state.t))
+        events["navigation"].append(float(state.t))
+        if record_telemetry:
+            nav_log["truth"].append(truth_row)
+            nav_log["measurement"].append(measurement_row)
+            nav_log["estimate"].append(_state_record(x_hat))
+            inertial_log["specific_force_body"].append(
+                (np.asarray(aux["F_body_total"]) + np.asarray(aux["F_pad_body"]))
+                / float(state.m)
+            )
+            inertial_log["omega_inertial_body"].append(
+                np.array(aux["omega_inertial_body"], copy=True)
+            )
+        return x_hat, nav_mem
+
     if bool(state.done):
         _log_step(log, aux_log, state, phase, aux)
     boundaries = set(range(0, schedule.horizon, schedule.block)) | {schedule.horizon}
@@ -524,42 +582,7 @@ def run_simulation(
         if not np.isclose(float(state.t), t, rtol=0.0, atol=1e-8):
             raise RuntimeError("native time diverged from the integer-tick schedule")
         if nav is not None and tick % schedule.navigation == 0:
-            seed = int(nav_rng.bit_generator.random_raw())
-            # Keep independent records even if an estimator updates its input arrays in place.
-            truth_row = _state_record(state) if record_telemetry else None
-            if hasattr(nav, "measure_native"):
-                meas = nav.measure_native(copy.deepcopy(state), seed, copy.deepcopy(aux))
-            else:
-                meas = nav.measure(copy.deepcopy(state), seed)
-            meas = _stamp_epoch(meas, float(state.t))
-            measurement_row = _state_record(meas) if record_telemetry else None
-            if record_telemetry and hasattr(meas, "accel_body"):
-                for key in (
-                    "accel_body",
-                    "gyro_body",
-                    "gnss_valid",
-                    "radar_alt_m",
-                    "radar_valid",
-                    "alignment_valid",
-                    "gnss_scheduled",
-                    "radar_scheduled",
-                    "gnss_outlier",
-                ):
-                    sensor_log.setdefault(key, []).append(np.array(getattr(meas, key), copy=True))
-            x_hat, nav_mem = nav.estimate(meas, held, nav_mem)
-            x_hat = _stamp_epoch(x_hat, float(state.t))
-            events["navigation"].append(float(state.t))
-            if record_telemetry:
-                nav_log["truth"].append(truth_row)
-                nav_log["measurement"].append(measurement_row)
-                nav_log["estimate"].append(_state_record(x_hat))
-                inertial_log["specific_force_body"].append(
-                    (np.asarray(aux["F_body_total"]) + np.asarray(aux["F_pad_body"]))
-                    / float(state.m)
-                )
-                inertial_log["omega_inertial_body"].append(
-                    np.array(aux["omega_inertial_body"], copy=True)
-                )
+            x_hat, nav_mem = _nav_step(state, aux, held, nav_mem)
         if split and tick % schedule.guidance == 0:
             cmd, gnc_mem = controller.guide(x_hat, t, gnc_mem)
             phase = int(cmd.phase)
@@ -569,7 +592,7 @@ def run_simulation(
             requested = _copy_command(row["command"])
             held = requested
             t_command = t_held = float(state.t)
-            phase = row["phase"]
+            phase = row["phase"] + phase_offset
             if row["separate"]:
                 physical_events.append(prescribed.separation.apply(session))
                 active_bundle = prescribed.separation.bundle
@@ -594,6 +617,24 @@ def run_simulation(
                 }
             )
             events["command_release"].append(float(state.t))
+            if tick == handoff_tick:
+                # Switch to closed-loop GNC on the post-event state; initialize navigation and
+                # guidance on this tick so the first closed-loop command is released now.
+                controller, nav = handoff.build(state, aux)
+                nav_mem = nav.initial_memory() if hasattr(nav, "initial_memory") else {}
+                gnc_mem = controller.initial_memory() if hasattr(controller, "initial_memory") else {}
+                split = hasattr(controller, "guide") and hasattr(controller, "control_allocate")
+                if not split and schedule.guidance != schedule.control:
+                    raise ValueError("independent guidance_dt requires guide/control_allocate")
+                closed = True
+                physical_events.append(
+                    {"t": float(state.t), "kind": "gnc_handoff", "label": "closed_loop_gnc"}
+                )
+                x_hat, nav_mem = _nav_step(state, aux, held, nav_mem)
+                if split:
+                    cmd, gnc_mem = controller.guide(x_hat, t, gnc_mem)
+                    phase = int(cmd.phase)
+                    events["guidance"].append(float(state.t))
         if mission is not None and configuration == 1 and tick % schedule.control == 0:
             event_count = len(mission.events)
             requested = mission.update(state, aux)
@@ -612,7 +653,7 @@ def run_simulation(
                 _log_step(log, aux_log, state, phase, aux)
             if mission.complete:
                 break
-        if prescribed is None and tick % schedule.control == 0:
+        if closed and tick % schedule.control == 0:
             if split:
                 act, gnc_mem = controller.control_allocate(cmd, x_hat, gnc_mem, t)
             else:
@@ -698,10 +739,15 @@ def run_simulation(
         success_speed_tol,
         success_tilt_tol_deg,
     )
-    if prescribed is None:
+    if closed:
         _attach_gnc_aux(result, gnc_mem)
-    else:
-        result.aux["phase_names"] = prescribed.phase_names
+    if prescribed is not None:
+        names = {k + phase_offset: v for k, v in prescribed.phase_names.items()}
+        if handoff is not None:
+            from sim.replay import PHASE_NAMES
+
+            names.update(PHASE_NAMES)
+        result.aux["phase_names"] = names
     if mission is not None:
         from gnc.guidance.boostback import PHASES
 
@@ -719,6 +765,8 @@ def run_simulation(
     result.aux["input_mode"] = (
         "mission"
         if mission is not None
+        else "launch_to_landing"
+        if handoff is not None
         else "prescribed"
         if prescribed is not None
         else "closed_loop"

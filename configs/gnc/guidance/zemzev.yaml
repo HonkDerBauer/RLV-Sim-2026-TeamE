@@ -1,0 +1,43 @@
+# ZEM/ZEV analytical feedback powered-descent guidance (gnc/guidance/zemzev.py).
+# Closed-loop law a_T = 6 ZEM/t_go^2 - 2 ZEV/t_go, re-evaluated every control tick from x_hat.
+powered_descent_method: zemzev # label (logged in replay)
+law:
+  _target_: gnc.guidance.zemzev.build
+
+# Aero-descent steering (engine-off coast): read by the framework aero-coast law.
+aero_steer_gain: 0.0
+aero_tilt_max_deg: 10.0
+
+# Shared with the convex methods so the comparison uses the same achievable thrust cone.
+attitude_tilt_max_deg: 15.0
+
+# Terminal condition (landing NED frame).
+zemzev_target_ned: [0.0, 0.0, 0.0]
+zemzev_target_vel_ned: [0.0, 0.0, 0.0]
+
+# Time-to-go: fixed (t_f committed at ignition) | optimal (re-solved quartic, min Gamma*t + 1/2 int |a|^2).
+zemzev_tgo_mode: fixed
+zemzev_gamma: 20.0         # time weight Gamma [m^2/s^4] for tgo_mode=optimal
+zemzev_fixed_tf_s: null    # optional terminal epoch from simulation start; null = choose at ignition
+
+# Ignition: latest time a margined feasible open-loop profile still exists.
+zemzev_margin_max: 0.15    # keep peak planned thrust <= (1-margin) * max (feedback headroom)
+zemzev_margin_min: 0.10    # keep planned thrust >= (1+margin) * throttle floor
+zemzev_ignition_lookahead_s: 0.5 # 0 => ignite at the FIRST feasible instant (comparison)
+zemzev_tgo_min_s: 2.0
+zemzev_tgo_max_s: 60.0
+zemzev_tgo_grid_s: 0.25
+
+# Terminal: below this t_go fly the latched open-loop linear profile (1/t^2 gains are singular).
+zemzev_tgo_freeze_s: 0.5
+# Lateral thrust acts through the attitude loop (PD settling ~4/(zeta*wn) ~ 4 s), so the lateral
+# channel must stay well below that bandwidth. Vertical (throttle) keeps the full ZEM/ZEV gains.
+zemzev_tgo_lateral_floor_s: 8.0  # lateral gains use max(t_go, floor): caps 6/t^2 and 2/t
+zemzev_lateral_vnull_tgo_s: 2.5  # below this t_go: lateral ZEV-only velocity nulling a = ZEV/tau
+zemzev_lateral_vnull_tau_s: 1.5
+zemzev_terminal_tilt_max_deg: 15.0 # lateral tilt cap in the endgame (= attitude cap: off)
+# Lag-aware lateral law: first-order lag a' = (u - a)/tau on the lateral channel (attitude loop).
+# 0 = classic ZEM/ZEV. The PD loop (wn = 1.4 rad/s, zeta = 0.7) has an effective lag 2*zeta/wn ~ 1 s.
+zemzev_lateral_lag_tau_s: 0.0
+
+zemzev_log_every: 1        # telemetry record every N guidance/track ticks

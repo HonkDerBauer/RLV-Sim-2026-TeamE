@@ -1,0 +1,104 @@
+# @package _global_
+# End-to-end booster mission in ONE continuous run: liftoff -> prescribed ascent -> MECO ->
+# stage separation -> [closed-loop GNC from here] flip/coast -> entry burn -> aero descent ->
+# landing burn on a downrange droneship (no boostback).
+#
+# The NED origin is the droneship; the launch pad sits up-range of it (same convention as the
+# `ascent` scenario, which places LC-39A relative to LZ-1). Fixed (non-rotating) Earth: flat ground,
+# locally vertical inverse-square gravity. The ascent is prescribed (open loop); the descent is
+# flown by the configured GNC on the navigation estimate. Assumptions: docs/reference/launch_to_landing.md.
+#
+#   python scripts/run_single.py scenario=launch_to_landing
+#   python scripts/run_single.py scenario=launch_to_landing gnc/navigation=synthetic_eskf
+defaults:
+  - ascent_separation
+  - override /gnc/scheduler: altitude
+  - override /gnc/guidance: zemzev
+  - override /gnc/control: pd
+  - override /gnc/allocation: default
+  - override /gnc/navigation: identity
+  - _self_
+
+plant:
+  vehicle:
+    actuator:
+      rcs_fuel0: 400.0 # cold gas [kg] (assumed): the 180-deg-class flip alone needs ~190 kg here
+gnc:
+  delay_ticks: 0
+  scheduler:
+    flip_coast: true            # engine-off RCS flip to engine-first after separation
+    flip_rate_max_deg_s: 0.7    # flip coast rate [deg/s]; cold-gas cost ~ rate (spin-up + braking)
+    flip_accel_deg_s2: 0.03     # braking profile accel [deg/s^2] (RCS pitch authority ~0.06)
+    reentry_start_altitude: 60000.0 # entry-burn ignition (descending through this altitude) [m]
+    reentry_cutoff_speed_mps: 800.0 # entry-burn cutoff speed [m/s] (or reentry_end_altitude)
+    reentry_end_altitude: 20000.0
+    switch_altitude: 12000.0    # hand over to the landing law early: ZEM/ZEV picks the ignition time itself
+    reentry_engines: [0, 1, 5]
+    landing_engines: [0]
+  control:
+    roll_free: true             # axisymmetric booster: control body-x pointing, damp roll rate only
+  allocation:
+    rcs_enabled: true           # cold-gas RCS: the only torque source for the vacuum flip
+  guidance:
+    aero_attitude: retrograde   # zero-AoA engine-first aero descent on the slanted trajectory
+    attitude_tilt_max_deg: 35.0 # landing burn starts as a gravity turn (flight path ~ -60 deg)
+    zemzev_terminal_tilt_max_deg: 15.0
+    zemzev_coast_attitude: retrograde # hold zero AoA until the landing-burn ignition
+    zemzev_tgo_max_s: 60.0
+    # Re-solve t_go every tick: the vacuum ZEM/ZEV model ignores drag, which dominates the early
+    # landing burn here. A committed (fixed) t_f expires above the pad; re-solving absorbs drag.
+    zemzev_tgo_mode: optimal
+
+scenario:
+  name: launch_to_landing
+  description: Liftoff to droneship touchdown; prescribed ascent, closed-loop descent GNC.
+  input_mode: launch_to_landing
+  start_phase: flip
+  ic:
+    r_ned: [-498170.0, 280.0, 0.0] # launch pad up-range of the droneship (tuned to the impact point)
+    v_ned: [0.0, 0.0, 0.0]
+    pitch_deg: 90.0
+    yaw_deg: 0.0 # ascent azimuth: north, toward the droneship
+    m: 545200.0
+    rcs_fuel: 400.0
+    throttle0: 1.0
+    launch_pad: true
+  horizon:
+    t_max: 700.0
+    input_dt: 0.02
+    ctrl_dt: 0.02
+    nav_dt: 0.01
+    guidance_dt: 1.0
+    log_dt: 0.2
+  separation:
+    impulse_model: none
+    fwd_axis: [-1.0, 0.0, 0.0] # base-first recovery aero reference after separation
+    aero:
+      coeffs: # recovery (base-first) coefficients, as in plant/aero/table.yaml
+        cd_base: 1.0
+        cd_transonic: 0.9
+        cd_hyper: 0.8
+        cd_alpha: 2.0
+        cn_alpha: 2.5
+        xcp_frac_base: 0.70
+        xcp_frac_alpha: 0.12
+  inputs:
+    - {t: 0.0, label: ascent, throttle: 1.0, fin_deployment: 0.0}
+    - t: 10.0
+      label: pitch_kick
+      gimbal: [[0.0035, 0], [0.0035, 0], [0.0035, 0], [0.0035, 0], [0.0035, 0], [0.0035, 0], [0.0035, 0], [0.0035, 0], [0.0035, 0]]
+    - {t: 12.0, label: gravity_turn, gimbal: 0.0}
+    - {t: 50.0, label: throttle_down, throttle: 0.8}
+    - {t: 74.0, label: full_thrust, throttle: 1.0}
+    - {t: 135.0, label: meco_coast, throttle: 0.0}
+    - {t: 140.0, label: separation, separate: true, fin_deployment: 1.0}
+  dispersion:
+    enable: false
+    pos_sigma: [0.0, 0.0, 0.0]
+    vel_sigma: [0.0, 0.0, 0.0]
+  success:
+    pos_tol: 10.0
+    speed_tol: 5.0
+    tilt_tol_deg: 15.0
+  reference:
+    enabled: false

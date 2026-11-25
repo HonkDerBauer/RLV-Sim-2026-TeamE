@@ -43,6 +43,7 @@ class Phase(enum.IntEnum):
     AERO_DESCENT = 1  # engine off, fins/RCS only (statically unstable, base-first)
     POWERED_BRAKE = 2  # optional 3-engine landing-brake start (3-0-3-1 profile)
     POWERED_DESCENT = 3  # final landing burn: TVC primary, fins assist (1 engine)
+    FLIP_COAST = 4  # optional post-separation coast: engine off, RCS flip to engine-first
 
 
 class TerminationReason(enum.IntEnum):

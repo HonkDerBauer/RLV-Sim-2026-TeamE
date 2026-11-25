@@ -18,7 +18,15 @@ from core.interfaces import Phase
 from gnc.context import GncContext
 from gnc.guidance.aero_descent import AeroDescentGuidance
 from gnc.guidance.base import as_command
-from gnc.guidance.phase import SequentialPhaseScheduler, altitude_below, single_crossing
+from gnc.guidance.flip_coast import FlipCoastGuidance
+from gnc.guidance.phase import (
+    SequentialPhaseScheduler,
+    altitude_below,
+    any_of,
+    descending_below,
+    single_crossing,
+    speed_below,
+)
 from gnc.guidance.reentry_burn import ReentryBurnGuidance
 from gnc.guidance.scheduled import ScheduledGuidance
 from gnc.stack import GNCStack
@@ -192,6 +200,7 @@ def default_nominal(params, alloc, atmosphere_model: str) -> dict:
 
 
 _PHASE_NAME = {
+    "flip": int(Phase.FLIP_COAST),
     "reentry": int(Phase.REENTRY_BURN),
     "aero": int(Phase.AERO_DESCENT),
     "brake": int(Phase.POWERED_BRAKE),
@@ -200,8 +209,16 @@ _PHASE_NAME = {
 
 
 def build_scheduler(cfg_sched, start_phase: str):
-    """Construct the latching post-flip phase scheduler from gnc/scheduler config."""
+    """Construct the latching post-flip phase scheduler from gnc/scheduler config.
+
+    Optional keys (absent => previous behavior):
+    * ``flip_coast``: prepend an engine-off FLIP_COAST phase; it ends once the vehicle is
+      descending below ``reentry_start_altitude`` (entry-burn ignition).
+    * ``reentry_cutoff_speed_mps``: end the entry burn when the speed drops below this value
+      (or, as before, below ``reentry_end_altitude``, whichever comes first).
+    """
     brake = bool(cfg_sched.powered_brake)
+    flip = bool(cfg_sched.get("flip_coast", False))
     h_reentry_end = float(cfg_sched.reentry_end_altitude)
     h_switch = float(cfg_sched.switch_altitude)
     h_brake_end = float(cfg_sched.brake_end_altitude)
@@ -238,6 +255,21 @@ def build_scheduler(cfg_sched, start_phase: str):
         guards = [single_crossing(_alt_psi, th) for th in thresholds]
     else:
         raise ValueError(f"unknown scheduler type: {stype}")
+
+    v_cut = cfg_sched.get("reentry_cutoff_speed_mps")
+    if v_cut is not None:
+        v_cut = float(v_cut)
+        if not v_cut > 0.0:
+            raise ValueError("reentry_cutoff_speed_mps must be positive")
+        guards[0] = any_of(guards[0], speed_below(v_cut))
+    if flip:
+        h_start = float(cfg_sched.reentry_start_altitude)
+        if not h_start > h_reentry_end:
+            raise ValueError(
+                f"reentry_start_altitude ({h_start}) must exceed reentry_end ({h_reentry_end})"
+            )
+        phases.insert(0, int(Phase.FLIP_COAST))
+        guards.insert(0, descending_below(h_start))
 
     if start_phase not in _PHASE_NAME:
         raise ValueError(f"unknown start_phase {start_phase!r}; pick {list(_PHASE_NAME)}")
@@ -339,6 +371,7 @@ def build_gnc(cfg, params) -> GNCStack:
         aero_active,
         steer_gain=float(gd.aero_steer_gain),
         max_tilt_deg=float(gd.aero_tilt_max_deg),
+        attitude=str(gd.get("aero_attitude", "upright")),
     )
     powered_final = make_powered_guidance(final_active, int(Phase.POWERED_DESCENT))
 
@@ -349,6 +382,12 @@ def build_gnc(cfg, params) -> GNCStack:
         int(Phase.AERO_DESCENT): aero_guid,
         int(Phase.POWERED_DESCENT): powered_final,
     }
+    if int(Phase.FLIP_COAST) in scheduler.phases:
+        phase_guidance[int(Phase.FLIP_COAST)] = FlipCoastGuidance(
+            aero_active,
+            rate_max_deg_s=float(sched.get("flip_rate_max_deg_s", 0.7)),
+            accel_deg_s2=float(sched.get("flip_accel_deg_s2", 0.03)),
+        )
     if bool(sched.powered_brake):
         phase_guidance[int(Phase.POWERED_BRAKE)] = make_powered_guidance(
             brake_active, int(Phase.POWERED_BRAKE)

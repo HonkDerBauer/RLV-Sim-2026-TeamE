@@ -50,6 +50,21 @@ def descent_speed_above(vz_switch: float) -> Guard:
     return lambda x, t: float(np.asarray(x.v_ned)[2]) > vz_switch
 
 
+def descending_below(h_switch: float) -> Guard:
+    """Fire when altitude is below ``h_switch`` AND the vehicle is descending (v_D > 0).
+
+    Unlike :func:`altitude_below`, this cannot fire on the ascending branch of a coast arc.
+    """
+    return lambda x, t: (
+        float(-np.asarray(x.r_ned)[2]) < h_switch and float(np.asarray(x.v_ned)[2]) > 0.0
+    )
+
+
+def any_of(*guards: Guard) -> Guard:
+    """Fire when any of ``guards`` fires."""
+    return lambda x, t: any(bool(g(x, t)) for g in guards)
+
+
 def time_after(t_switch: float) -> Guard:
     return lambda x, t: t >= t_switch
 

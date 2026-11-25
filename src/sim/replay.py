@@ -24,7 +24,13 @@ from core.frames import body_to_ned
 _SQRT_HALF = float(np.sqrt(0.5))
 Q_VN = np.array([_SQRT_HALF, _SQRT_HALF, 0.0, 0.0])
 
-PHASE_NAMES = {0: "REENTRY_BURN", 1: "AERO_DESCENT", 2: "POWERED_BRAKE", 3: "POWERED_DESCENT"}
+PHASE_NAMES = {
+    0: "REENTRY_BURN",
+    1: "AERO_DESCENT",
+    2: "POWERED_BRAKE",
+    3: "POWERED_DESCENT",
+    4: "FLIP_COAST",
+}
 
 
 def _qmul(q, p):
